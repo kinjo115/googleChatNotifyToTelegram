@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      body {
+        margin: 0;
+        width: 280px;
+        font: 14px/1.4 "Segoe UI", sans-serif;
+        color: #1c1917;
+      }
+      main {
+        padding: 14px;
+        display: grid;
+        gap: 10px;
+      }
+      h1 {
+        font-size: 15px;
+        margin: 0;
+      }
+      p {
+        margin: 0;
+      }
+      button {
+        font: inherit;
+        border: 0;
+        border-radius: 8px;
+        padding: 8px 10px;
+        background: #0f766e;
+        color: #fff;
+        cursor: pointer;
+      }
+      button.secondary {
+        background: #f5f5f4;
+        color: #1c1917;
+      }
+      #status {
+        white-space: pre-wrap;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Google Chat to Telegram</h1>
+      <p id="status">Checking…</p>
+      <button id="open" type="button">Open Google Chat</button>
+      <button id="options" class="secondary" type="button">Settings</button>
+    </main>
+    <script src="popup.js"></script>
+  </body>
+</html>
