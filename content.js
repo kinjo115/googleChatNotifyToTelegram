@@ -1,10 +1,18 @@
 const SCAN_MS = 2500;
-const FRESH_MS = 90 * 1000;
+const LIVE_MS = 60 * 60 * 1000;
+const JUST_MS = 3 * 60 * 1000;
+const FLAG_MS = 2 * 60 * 60 * 1000;
+const RECENT_MS = 15 * 60 * 1000;
 
 let timer = 0;
 let waitingSince = 0;
+let baselineUntil = 0;
 const armedTopic = new Map();
 const armedRoomTime = new Map();
+const armedNav = new Map();
+const armedMessage = new Set();
+const armedLegacy = new Set();
+const recent = new Map();
 
 function linesOf(el) {
   return (el.innerText || "")
@@ -99,23 +107,24 @@ function isHidden(el) {
   }
 }
 
-function isFresh(ts) {
+function isRecent(ts, windowMs) {
   if (!ts) return false;
   const delta = Date.now() - ts;
-  return delta >= -15000 && delta <= FRESH_MS;
+  return delta >= -15000 && delta <= windowMs;
 }
 
 function unreadCount(topic) {
-  let best = Math.max(
-    positiveCount(topic, "data-unread-reply-count-to-display"),
-    positiveCount(topic, "data-unread-reply-count")
-  );
-  for (const el of topic.querySelectorAll("[data-unread-reply-count], [data-unread-reply-count-to-display]")) {
-    best = Math.max(
-      best,
-      positiveCount(el, "data-unread-reply-count-to-display"),
-      positiveCount(el, "data-unread-reply-count")
-    );
+  const attrs = [
+    "data-unread-reply-count-to-display",
+    "data-unread-reply-count",
+    "data-unread-self-mention-count-to-display",
+    "data-unread-self-mention-count",
+  ];
+  let best = 0;
+  for (const attr of attrs) best = Math.max(best, positiveCount(topic, attr));
+  const selector = attrs.map((attr) => `[${attr}]`).join(", ");
+  for (const el of topic.querySelectorAll(selector)) {
+    for (const attr of attrs) best = Math.max(best, positiveCount(el, attr));
   }
   return best;
 }
@@ -137,6 +146,11 @@ function unreadLabel(topic, count) {
   return count === 1 ? "1 unread reply" : `${count} unread replies`;
 }
 
+function stampValue(el) {
+  const value = Number(el.getAttribute("data-absolute-timestamp") || "");
+  return Number.isFinite(value) && value > 0 ? value : 0;
+}
+
 function replyTime(topic) {
   const shown = Number(topic.getAttribute("data-last-reply-time-msec-to-display") || "");
   let max = Number.isFinite(shown) && shown > 0 ? shown : 0;
@@ -146,6 +160,11 @@ function replyTime(topic) {
     const value = Number(el.getAttribute("data-last-reply-time-msec") || "");
     if (Number.isFinite(value) && value > max) max = value;
   }
+  for (const stamp of topic.querySelectorAll("[data-absolute-timestamp]")) {
+    if (stamp.closest('[role="textbox"], [contenteditable="true"]')) continue;
+    const value = stampValue(stamp);
+    if (value > max) max = value;
+  }
   return max;
 }
 
@@ -154,27 +173,50 @@ function lastReplyTime(topic) {
   return time ? String(time) : "";
 }
 
-function topicNodes() {
-  const byId = new Map();
+function topicEntries() {
+  const grouped = new Map();
   for (const node of document.querySelectorAll("c-wiz[data-topic-id]")) {
     if (node.closest("[data-shortcut-type]")) continue;
     const id = node.getAttribute("data-topic-id") || "";
     if (!id) continue;
-    const prev = byId.get(id);
-    if (!prev || replyTime(node) >= replyTime(prev)) byId.set(id, node);
+    if (!grouped.has(id)) grouped.set(id, []);
+    grouped.get(id).push(node);
   }
-  return [...byId.values()];
+  const entries = [];
+  for (const [id, nodes] of grouped) {
+    let node = nodes[0];
+    let time = 0;
+    let count = 0;
+    for (const candidate of nodes) {
+      const candidateTime = replyTime(candidate);
+      const candidateCount = unreadCount(candidate);
+      if (candidateTime >= time) {
+        time = candidateTime;
+        node = candidate;
+      }
+      if (candidateCount > count) count = candidateCount;
+    }
+    entries.push({ id, node, time, count });
+  }
+  return entries;
 }
 
-function topicChanged(topicId, time, count) {
+function topicChanged(topicId, time, count, baselining) {
   const prev = armedTopic.get(topicId);
+  const storedTime = Math.max(prev ? prev.time : 0, time || 0);
   if (!prev) {
-    armedTopic.set(topicId, { time: time || 0, count: count || 0 });
+    armedTopic.set(topicId, { time: time || 0, count });
+    if (baselining) return false;
+    return count > 0 && isRecent(time, JUST_MS);
+  }
+  if (baselining) {
+    armedTopic.set(topicId, { time: storedTime, count });
     return false;
   }
-  const countGrew = count > prev.count && isFresh(time);
-  const timeGrew = time > prev.time && isFresh(time);
-  armedTopic.set(topicId, { time: Math.max(prev.time, time || 0), count });
+  const timeMoved = time > prev.time + 5000;
+  const countGrew = count > prev.count;
+  const timeGrew = !countGrew && timeMoved && prev.time > 0 && isRecent(time, LIVE_MS);
+  armedTopic.set(topicId, { time: storedTime, count });
   return countGrew || timeGrew;
 }
 
@@ -226,7 +268,8 @@ function rowFromLive(groupId, topicId, time, scope, forwardOwn) {
   const matched = latest && time && Math.abs(latest.ts - time) < 5000;
   const sender = matched ? latest.sender : "";
   const container = matched ? latest.container : null;
-  if (matched && !forwardOwn && (isYou(sender) || containerIsOwn(container))) return null;
+  const scopeIsOwn = scope && scope.getAttribute("data-is-viewer-message-creator") === "true";
+  if (!forwardOwn && (scopeIsOwn || (matched && (isYou(sender) || containerIsOwn(container))))) return null;
   let preview = "New message";
   if (matched && latest.body) {
     preview = sender && !isYou(sender) ? `${sender}: ${latest.body}` : latest.body;
@@ -272,8 +315,13 @@ function rowFromTopic(topic, count, forwardOwn) {
   return { name: clip(name, 160), preview, key, groupId };
 }
 
+function navTextUnread(item) {
+  return /unread\s+(followed\s+)?thread|\bunread\s+message\b|읽지 않은\s*(대화|메시지|답글)?/i.test(textOf(item));
+}
+
 function navIsUnread(item) {
   if (item.hasAttribute("data-shortcut-type") || item.closest("[data-shortcut-type]")) return false;
+  if (navTextUnread(item)) return true;
   for (const el of item.querySelectorAll("[aria-label]")) {
     const label = el.getAttribute("aria-label") || "";
     if (!/unread|읽지 않/i.test(label)) continue;
@@ -302,6 +350,9 @@ function rowFromNav(item, forwardOwn) {
       break;
     }
   }
+  if (!badge && navTextUnread(item)) {
+    badge = linesOf(item).find((line) => /unread|읽지/i.test(line)) || "Unread thread";
+  }
   if (!preview) preview = badge || "Unread";
   preview = clip(preview, 700);
   if (!name || !preview) return null;
@@ -329,22 +380,96 @@ function addRow(byKey, row) {
   if (!prev || row.preview.length > prev.preview.length) byKey.set(row.key, row);
 }
 
+function retain(row) {
+  if (!row || !row.key || recent.has(row.key)) return;
+  recent.set(row.key, { row, at: Date.now() });
+}
+
+function addRecent(byKey) {
+  const now = Date.now();
+  for (const [key, item] of recent) {
+    if (now - item.at > RECENT_MS) {
+      recent.delete(key);
+      continue;
+    }
+    addRow(byKey, item.row);
+  }
+}
+
+function messageHost(el) {
+  if (el.matches && el.matches("[data-id]")) return el;
+  return el.closest("[data-id]");
+}
+
+function hostTime(host) {
+  let max = 0;
+  for (const stamp of host.querySelectorAll("[data-absolute-timestamp]")) {
+    if (stamp.closest('[role="textbox"], [contenteditable="true"]')) continue;
+    const value = stampValue(stamp);
+    if (value > max) max = value;
+  }
+  return max;
+}
+
+function collectMessageHosts() {
+  const byId = new Map();
+  for (const el of document.querySelectorAll('[data-is-new="true"], div.nF6pT[data-id]')) {
+    const host = messageHost(el);
+    if (!host) continue;
+    const id = host.getAttribute("data-id") || "";
+    if (!id) continue;
+    const flagged = el.getAttribute("data-is-new") === "true" || host.getAttribute("data-is-new") === "true" || Boolean(host.querySelector('[data-is-new="true"]'));
+    const prev = byId.get(id);
+    if (!prev || (flagged && !prev.flagged)) byId.set(id, { id, host, flagged, ts: hostTime(host) });
+  }
+  return [...byId.values()];
+}
+
 function collectRows(forwardOwn) {
+  if (!baselineUntil) baselineUntil = Date.now() + 8000;
+  const baselining = Date.now() < baselineUntil;
   const byKey = new Map();
   const groups = new Set();
   const coveredTimes = [];
+  const coveredTopics = new Set();
 
-  for (const topic of topicNodes()) {
-    const topicId = topic.getAttribute("data-topic-id") || "";
-    const groupId = groupIdOf(topic);
-    const count = unreadCount(topic);
-    const time = replyTime(topic);
-    if (!topicChanged(topicId, time, count)) continue;
-    let row = count > 0 ? rowFromTopic(topic, count, forwardOwn) : null;
-    if (!row && time) row = rowFromLive(groupId, topicId, time, topic, forwardOwn);
-    if (time) coveredTimes.push(time);
-    const latest = latestMessage(topic);
-    if (latest) coveredTimes.push(latest.ts);
+  const hosts = collectMessageHosts();
+  if (baselining) {
+    for (const item of hosts) armedMessage.add(item.id);
+  } else {
+    const fresh = [];
+    for (const item of hosts) {
+      if (armedMessage.has(item.id)) continue;
+      const windowMs = item.flagged ? FLAG_MS : JUST_MS;
+      if (!isRecent(item.ts, windowMs)) {
+        armedMessage.add(item.id);
+        continue;
+      }
+      fresh.push(item);
+    }
+    fresh.sort((a, b) => b.ts - a.ts);
+    for (const item of fresh.slice(0, 8)) {
+      armedMessage.add(item.id);
+      const groupId = groupIdOf(item.host);
+      const topic = item.host.closest("[data-topic-id]");
+      const topicId = topic ? topic.getAttribute("data-topic-id") || "" : "";
+      const row = rowFromLive(groupId, topicId || item.id, item.ts, item.host, forwardOwn);
+      if (!row) continue;
+      row.key = `msg|${item.id}`;
+      addRow(byKey, row);
+      if (item.ts) coveredTimes.push(item.ts);
+      if (topicId) coveredTopics.add(topicId);
+      if (row.groupId) groups.add(row.groupId);
+    }
+  }
+
+  for (const entry of topicEntries()) {
+    const groupId = groupIdOf(entry.node);
+    const changed = topicChanged(entry.id, entry.time, entry.count, baselining);
+    if (!changed || coveredTopics.has(entry.id)) continue;
+    let row = entry.count > 0 ? rowFromTopic(entry.node, entry.count, forwardOwn) : null;
+    if (!row && entry.time) row = rowFromLive(groupId, entry.id, entry.time, entry.node, forwardOwn);
+    if (entry.time) coveredTimes.push(entry.time);
     if (!row) continue;
     addRow(byKey, row);
     if (row.groupId) groups.add(row.groupId);
@@ -356,35 +481,57 @@ function collectRows(forwardOwn) {
     let maxTs = 0;
     for (const stamp of main.querySelectorAll("[data-absolute-timestamp]")) {
       if (isHidden(stamp) || stamp.closest('[role="textbox"], [contenteditable="true"]')) continue;
-      const ts = Number(stamp.getAttribute("data-absolute-timestamp") || "");
-      if (Number.isFinite(ts) && ts > maxTs) maxTs = ts;
+      const value = stampValue(stamp);
+      if (value > maxTs) maxTs = value;
     }
     const prev = armedRoomTime.get(groupId);
-    if (prev === undefined) armedRoomTime.set(groupId, maxTs);
-    else if (maxTs > prev) {
+    if (prev === undefined || baselining) armedRoomTime.set(groupId, Math.max(prev || 0, maxTs));
+    else if (maxTs > prev + 5000) {
       armedRoomTime.set(groupId, maxTs);
-      if (isFresh(maxTs) && !timeCovered(coveredTimes, maxTs)) {
+      if (isRecent(maxTs, LIVE_MS) && !timeCovered(coveredTimes, maxTs)) {
         addRow(byKey, rowFromLive(groupId, "", maxTs, main, forwardOwn));
       }
     }
   }
 
   const openGroup = main ? main.getAttribute("data-group-id") || "" : "";
+  const seenNav = new Set();
   for (const item of document.querySelectorAll('[role="listitem"][data-group-id]')) {
     const groupId = item.getAttribute("data-group-id") || "";
-    if (!groupId || groupId === openGroup || groups.has(groupId) || !navIsUnread(item)) continue;
-    addRow(byKey, rowFromNav(item, forwardOwn));
+    if (!groupId || !navIsUnread(item)) continue;
+    const threadUnread = navTextUnread(item);
+    if (groupId === openGroup && !threadUnread) continue;
+    seenNav.add(groupId);
+    const row = rowFromNav(item, forwardOwn);
+    if (!row) continue;
+    if (baselining) {
+      armedNav.set(groupId, row.key);
+      continue;
+    }
+    const prevKey = armedNav.get(groupId);
+    armedNav.set(groupId, row.key);
+    if (prevKey === row.key || groups.has(groupId)) continue;
+    addRow(byKey, row);
+  }
+  for (const id of [...armedNav.keys()]) {
+    if (!seenNav.has(id)) armedNav.delete(id);
   }
 
   for (const el of document.querySelectorAll("[data-is-unread]")) {
     const value = el.getAttribute("data-is-unread");
     if (value === "false" || value === "0") continue;
-    addRow(byKey, rowFromLegacy(el, forwardOwn));
+    const row = rowFromLegacy(el, forwardOwn);
+    if (!row || armedLegacy.has(row.key)) continue;
+    armedLegacy.add(row.key);
+    if (!baselining) addRow(byKey, row);
   }
 
   let listCount = document.querySelectorAll('[role="listitem"][data-group-id]').length;
+  if (!listCount && main) listCount = 1;
+  if (baselining) return { listCount, rows: [] };
+  for (const row of byKey.values()) retain(row);
+  addRecent(byKey);
   const rows = [...byKey.values()].map(({ name, preview, key }) => ({ name, preview, key }));
-  if (!listCount && document.querySelector('[role="main"][data-group-id]')) listCount = 1;
   return { listCount, rows };
 }
 
@@ -400,18 +547,25 @@ function shellReady() {
   return true;
 }
 
+let publishing = false;
+
 async function publish() {
-  if (!shellReady()) return;
-  let forwardOwn = false;
+  if (publishing || !shellReady()) return;
+  publishing = true;
   try {
-    const stored = await chrome.storage.local.get({ forwardOwn: false });
-    forwardOwn = Boolean(stored.forwardOwn);
-  } catch {
-    return;
+    let forwardOwn = false;
+    try {
+      const stored = await chrome.storage.local.get({ forwardOwn: false });
+      forwardOwn = Boolean(stored.forwardOwn);
+    } catch {
+      return;
+    }
+    const snapshot = collectRows(forwardOwn);
+    if (snapshot.listCount < 1) return;
+    chrome.runtime.sendMessage({ type: "unread-snapshot", ...snapshot }).catch(() => {});
+  } finally {
+    publishing = false;
   }
-  const snapshot = collectRows(forwardOwn);
-  if (snapshot.listCount < 1) return;
-  chrome.runtime.sendMessage({ type: "unread-snapshot", ...snapshot }).catch(() => {});
 }
 
 function schedule() {
@@ -433,9 +587,12 @@ if (window === window.top) {
     attributes: true,
     attributeFilter: [
       "data-is-unread",
+      "data-is-new",
       "aria-label",
       "data-unread-reply-count",
       "data-unread-reply-count-to-display",
+      "data-unread-self-mention-count",
+      "data-unread-self-mention-count-to-display",
       "data-last-reply-time-msec",
       "data-last-reply-time-msec-to-display",
       "data-absolute-timestamp",

@@ -4,7 +4,6 @@ const SESSION_PRIMED = "primed";
 let seen = new Set();
 let primed = false;
 let baselineSig = "";
-let stableHits = 0;
 let primeStarted = 0;
 let lastError = "";
 let loaded = false;
@@ -128,20 +127,16 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     .then(async () => {
       if (listCount < 1) return;
       if (!primed) {
-        const sig = signature(rows);
         if (!primeStarted) primeStarted = Date.now();
-        if (sig === baselineSig) stableHits += 1;
-        else {
-          baselineSig = sig;
-          stableHits = 0;
+        if (seen.size === 0 && !baselineSig) {
+          seen = new Set(rows.map((row) => row.key));
+          baselineSig = signature(rows) || "baseline";
+          return;
         }
-        seen = new Set(rows.map((row) => row.key));
-        if (stableHits >= 1 || Date.now() - primeStarted > 8000) {
-          primed = true;
-          await saveSession();
-          console.log("[chat-telegram] Watching for new messages.");
-        }
-        return;
+        if (Date.now() - primeStarted < 4000) return;
+        primed = true;
+        await saveSession();
+        console.log("[chat-telegram] Watching for new messages.");
       }
       await forwardNew(rows);
     })
