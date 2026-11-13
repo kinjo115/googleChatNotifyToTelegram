@@ -34,8 +34,8 @@ The test message should appear in that Telegram chat. A red **!** on the extensi
 ## While it is running
 
 - Keep one `https://chat.google.com/` tab open and signed in.
-- Wait a few seconds after the tab loads. The first snapshot is a baseline and is not forwarded.
-- New messages after that are sent as `Google Chat`, the room or sender name, and the message text.
+- Wait a few seconds after the tab loads. Unread replies and messages Chat still marks as new, from the last two hours, are sent once. Older history is not.
+- A message that arrives after that is sent as `Google Chat`, the room or sender name, and the message text.
 - Chats you are not looking at are picked up from the unread badge in the left nav.
 - The room you have open is watched directly, because Chat marks those messages read immediately.
 

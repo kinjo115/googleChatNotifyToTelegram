@@ -1,19 +1,31 @@
 const SESSION_KEYS = "seenKeys";
 const SESSION_PRIMED = "primed";
+const SEEN_VERSION = "3";
 
 let seen = new Set();
 let primed = false;
-let baselineSig = "";
-let primeStarted = 0;
 let lastError = "";
 let loaded = false;
+let lastNote = 0;
 const inflight = new Set();
 
 async function loadSession() {
   if (loaded) return;
-  const stored = await chrome.storage.session.get({ [SESSION_KEYS]: [], [SESSION_PRIMED]: false });
-  seen = new Set(stored[SESSION_KEYS] || []);
-  primed = Boolean(stored[SESSION_PRIMED]);
+  const stored = await chrome.storage.session.get({
+    [SESSION_KEYS]: [],
+    [SESSION_PRIMED]: false,
+    seenVersion: "",
+  });
+  if (stored.seenVersion !== SEEN_VERSION) {
+    seen = new Set();
+    primed = true;
+    loaded = true;
+    await saveSession();
+    return;
+  } else {
+    seen = new Set(stored[SESSION_KEYS] || []);
+    primed = Boolean(stored[SESSION_PRIMED]);
+  }
   loaded = true;
 }
 
@@ -22,6 +34,7 @@ async function saveSession() {
   await chrome.storage.session.set({
     [SESSION_KEYS]: keys.slice(-500),
     [SESSION_PRIMED]: primed,
+    seenVersion: SEEN_VERSION,
   });
   if (keys.length > 500) seen = new Set(keys.slice(-500));
 }
@@ -68,17 +81,22 @@ async function rememberError(error) {
 }
 
 async function clearError() {
-  if (!lastError) return;
   lastError = "";
   await chrome.storage.local.set({ lastError: "" });
   await chrome.action.setBadgeText({ text: "" });
 }
 
-function signature(rows) {
-  return rows
-    .map((row) => row.key)
-    .sort()
-    .join("\n");
+async function noteScan(stats) {
+  const now = Date.now();
+  if (now - lastNote < 8000) return;
+  lastNote = now;
+  await chrome.storage.local.set({
+    lastScanAt: now,
+    scanTopics: Number(stats.topics) || 0,
+    scanMessages: Number(stats.messages) || 0,
+    scanUnread: Number(stats.unread) || 0,
+    scanFlagged: Number(stats.flagged) || 0,
+  });
 }
 
 async function forwardNew(rows) {
@@ -95,6 +113,7 @@ async function forwardNew(rows) {
       await sendTelegram(`Google Chat\n${row.name}\n${row.preview}`);
       seen.add(row.key);
       await saveSession();
+      await chrome.storage.local.set({ lastSentAt: Date.now() });
       await clearError();
     } catch (error) {
       await rememberError(error.message || String(error));
@@ -119,21 +138,21 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return true;
   }
 
+  if (message?.type === "watch-error") {
+    rememberError(message.error || "Chat watcher failed.");
+    return;
+  }
+
   if (message?.type !== "unread-snapshot") return;
 
   const listCount = Number(message.listCount) || 0;
   const rows = Array.isArray(message.rows) ? message.rows : [];
+  const stats = message.stats || {};
   loadSession()
     .then(async () => {
-      if (listCount < 1) return;
+      await noteScan(stats);
+      if (listCount < 1 && !stats.topics) return;
       if (!primed) {
-        if (!primeStarted) primeStarted = Date.now();
-        if (seen.size === 0 && !baselineSig) {
-          seen = new Set(rows.map((row) => row.key));
-          baselineSig = signature(rows) || "baseline";
-          return;
-        }
-        if (Date.now() - primeStarted < 4000) return;
         primed = true;
         await saveSession();
         console.log("[chat-telegram] Watching for new messages.");

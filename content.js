@@ -1,12 +1,11 @@
 const SCAN_MS = 2500;
-const LIVE_MS = 60 * 60 * 1000;
-const JUST_MS = 3 * 60 * 1000;
 const FLAG_MS = 2 * 60 * 60 * 1000;
 const RECENT_MS = 15 * 60 * 1000;
 
 let timer = 0;
 let waitingSince = 0;
 let baselineUntil = 0;
+let catchUpDone = false;
 const armedTopic = new Map();
 const armedRoomTime = new Map();
 const armedNav = new Map();
@@ -201,21 +200,15 @@ function topicEntries() {
   return entries;
 }
 
-function topicChanged(topicId, time, count, baselining) {
+function topicChanged(topicId, time, count, warming) {
   const prev = armedTopic.get(topicId);
   const storedTime = Math.max(prev ? prev.time : 0, time || 0);
-  if (!prev) {
-    armedTopic.set(topicId, { time: time || 0, count });
-    if (baselining) return false;
-    return count > 0 && isRecent(time, JUST_MS);
-  }
-  if (baselining) {
-    armedTopic.set(topicId, { time: storedTime, count });
+  if (!prev || warming) {
+    armedTopic.set(topicId, { time: storedTime || time || 0, count });
     return false;
   }
-  const timeMoved = time > prev.time + 5000;
   const countGrew = count > prev.count;
-  const timeGrew = !countGrew && timeMoved && prev.time > 0 && isRecent(time, LIVE_MS);
+  const timeGrew = prev.time > 0 && time > prev.time + 1000;
   armedTopic.set(topicId, { time: storedTime, count });
   return countGrew || timeGrew;
 }
@@ -401,6 +394,34 @@ function messageHost(el) {
   return el.closest("[data-id]");
 }
 
+function hostIsOwn(host) {
+  if (!host) return false;
+  if (host.getAttribute("data-is-viewer-message-creator") === "true") return true;
+  for (const el of host.querySelectorAll('[data-is-viewer-message-creator="true"]')) {
+    const owner = el.closest("[data-id]");
+    if (!owner || owner === host) return true;
+  }
+  return false;
+}
+
+function rowFromHost(host, forwardOwn) {
+  if (!host) return null;
+  if (!forwardOwn && hostIsOwn(host)) return null;
+  const sender = senderName(host);
+  if (!forwardOwn && isYou(sender)) return null;
+  const body = messageBody(host);
+  let preview = body || "New message";
+  if (sender && !isYou(sender)) preview = body ? `${sender}: ${body}` : `${sender}: New message`;
+  preview = clip(preview, 700);
+  if (!preview || (!forwardOwn && isOwn(preview))) return null;
+  const groupId = groupIdOf(host);
+  const place = conversationName(groupId);
+  let name = place || (!isYou(sender) ? sender : "") || "Google Chat";
+  if (place && sender && !isYou(sender) && sender !== place) name = `${place} · ${sender}`;
+  const id = host.getAttribute("data-id") || "";
+  return { name: clip(name, 160), preview, key: `msg|${id}`, groupId };
+}
+
 function hostTime(host) {
   let max = 0;
   for (const stamp of host.querySelectorAll("[data-absolute-timestamp]")) {
@@ -425,48 +446,78 @@ function collectMessageHosts() {
   return [...byId.values()];
 }
 
+function pushMessage(byKey, groups, coveredTopics, item, forwardOwn) {
+  const row = rowFromHost(item.host, forwardOwn);
+  if (!row) return false;
+  addRow(byKey, row);
+  if (row.groupId) groups.add(row.groupId);
+  const topic = item.host.closest("[data-topic-id]");
+  const topicId = topic ? topic.getAttribute("data-topic-id") || "" : "";
+  if (topicId) coveredTopics.add(topicId);
+  return true;
+}
+
 function collectRows(forwardOwn) {
-  if (!baselineUntil) baselineUntil = Date.now() + 8000;
-  const baselining = Date.now() < baselineUntil;
+  if (!baselineUntil) baselineUntil = Date.now() + 5000;
+  const warming = Date.now() < baselineUntil;
   const byKey = new Map();
   const groups = new Set();
   const coveredTimes = [];
   const coveredTopics = new Set();
-
   const hosts = collectMessageHosts();
-  if (baselining) {
-    for (const item of hosts) armedMessage.add(item.id);
+  const topics = topicEntries();
+  let unread = 0;
+  let flagged = 0;
+  for (const item of hosts) if (item.flagged) flagged += 1;
+  for (const entry of topics) if (entry.count > 0) unread += 1;
+
+  if (warming) {
+    for (const item of hosts) {
+      if (item.ts && !isRecent(item.ts, 20000)) armedMessage.add(item.id);
+    }
+    for (const entry of topics) topicChanged(entry.id, entry.time, entry.count, true);
   } else {
-    const fresh = [];
+    const arrived = [];
     for (const item of hosts) {
       if (armedMessage.has(item.id)) continue;
-      const windowMs = item.flagged ? FLAG_MS : JUST_MS;
-      if (!isRecent(item.ts, windowMs)) {
+      if (item.ts && !isRecent(item.ts, FLAG_MS)) {
         armedMessage.add(item.id);
         continue;
       }
-      fresh.push(item);
+      arrived.push(item);
     }
-    fresh.sort((a, b) => b.ts - a.ts);
-    for (const item of fresh.slice(0, 8)) {
+    arrived.sort((a, b) => b.ts - a.ts);
+    for (const item of arrived.slice(0, 8)) {
       armedMessage.add(item.id);
-      const groupId = groupIdOf(item.host);
-      const topic = item.host.closest("[data-topic-id]");
-      const topicId = topic ? topic.getAttribute("data-topic-id") || "" : "";
-      const row = rowFromLive(groupId, topicId || item.id, item.ts, item.host, forwardOwn);
-      if (!row) continue;
-      row.key = `msg|${item.id}`;
-      addRow(byKey, row);
       if (item.ts) coveredTimes.push(item.ts);
-      if (topicId) coveredTopics.add(topicId);
-      if (row.groupId) groups.add(row.groupId);
+      pushMessage(byKey, groups, coveredTopics, item, forwardOwn);
+    }
+
+    if (!catchUpDone) {
+      catchUpDone = true;
+      const pending = hosts.filter((item) => {
+        return item.flagged && (!item.ts || isRecent(item.ts, FLAG_MS));
+      });
+      pending.sort((a, b) => b.ts - a.ts);
+      for (const item of pending.slice(0, 8)) pushMessage(byKey, groups, coveredTopics, item, forwardOwn);
+      const unreadTopics = topics.filter((entry) => entry.count > 0 && isRecent(entry.time, FLAG_MS));
+      unreadTopics.sort((a, b) => b.time - a.time);
+      for (const entry of unreadTopics.slice(0, 8)) {
+        if (coveredTopics.has(entry.id)) continue;
+        const row = rowFromTopic(entry.node, entry.count, forwardOwn);
+        if (!row) continue;
+        addRow(byKey, row);
+        coveredTopics.add(entry.id);
+        if (row.groupId) groups.add(row.groupId);
+        if (entry.time) coveredTimes.push(entry.time);
+      }
     }
   }
 
-  for (const entry of topicEntries()) {
+  for (const entry of topics) {
     const groupId = groupIdOf(entry.node);
-    const changed = topicChanged(entry.id, entry.time, entry.count, baselining);
-    if (!changed || coveredTopics.has(entry.id)) continue;
+    const changed = topicChanged(entry.id, entry.time, entry.count, warming);
+    if (warming || !changed || coveredTopics.has(entry.id)) continue;
     let row = entry.count > 0 ? rowFromTopic(entry.node, entry.count, forwardOwn) : null;
     if (!row && entry.time) row = rowFromLive(groupId, entry.id, entry.time, entry.node, forwardOwn);
     if (entry.time) coveredTimes.push(entry.time);
@@ -480,17 +531,15 @@ function collectRows(forwardOwn) {
     const groupId = main.getAttribute("data-group-id") || "";
     let maxTs = 0;
     for (const stamp of main.querySelectorAll("[data-absolute-timestamp]")) {
-      if (isHidden(stamp) || stamp.closest('[role="textbox"], [contenteditable="true"]')) continue;
+      if (stamp.closest('[role="textbox"], [contenteditable="true"]')) continue;
       const value = stampValue(stamp);
       if (value > maxTs) maxTs = value;
     }
     const prev = armedRoomTime.get(groupId);
-    if (prev === undefined || baselining) armedRoomTime.set(groupId, Math.max(prev || 0, maxTs));
-    else if (maxTs > prev + 5000) {
+    if (prev === undefined || warming) armedRoomTime.set(groupId, Math.max(prev || 0, maxTs));
+    else if (maxTs > prev + 1000) {
       armedRoomTime.set(groupId, maxTs);
-      if (isRecent(maxTs, LIVE_MS) && !timeCovered(coveredTimes, maxTs)) {
-        addRow(byKey, rowFromLive(groupId, "", maxTs, main, forwardOwn));
-      }
+      if (!timeCovered(coveredTimes, maxTs)) addRow(byKey, rowFromLive(groupId, "", maxTs, main, forwardOwn));
     }
   }
 
@@ -504,13 +553,17 @@ function collectRows(forwardOwn) {
     seenNav.add(groupId);
     const row = rowFromNav(item, forwardOwn);
     if (!row) continue;
-    if (baselining) {
+    if (warming) {
       armedNav.set(groupId, row.key);
       continue;
     }
     const prevKey = armedNav.get(groupId);
+    if (prevKey === row.key || groups.has(groupId)) {
+      armedNav.set(groupId, row.key);
+      continue;
+    }
+    if (byKey.size >= 8) continue;
     armedNav.set(groupId, row.key);
-    if (prevKey === row.key || groups.has(groupId)) continue;
     addRow(byKey, row);
   }
   for (const id of [...armedNav.keys()]) {
@@ -523,16 +576,23 @@ function collectRows(forwardOwn) {
     const row = rowFromLegacy(el, forwardOwn);
     if (!row || armedLegacy.has(row.key)) continue;
     armedLegacy.add(row.key);
-    if (!baselining) addRow(byKey, row);
+    if (!warming) addRow(byKey, row);
   }
 
   let listCount = document.querySelectorAll('[role="listitem"][data-group-id]').length;
   if (!listCount && main) listCount = 1;
-  if (baselining) return { listCount, rows: [] };
+  const stats = {
+    topics: topics.length,
+    messages: hosts.length,
+    unread,
+    flagged,
+    warming,
+  };
+  if (warming) return { listCount, rows: [], stats };
   for (const row of byKey.values()) retain(row);
   addRecent(byKey);
   const rows = [...byKey.values()].map(({ name, preview, key }) => ({ name, preview, key }));
-  return { listCount, rows };
+  return { listCount, rows, stats };
 }
 
 function shellReady() {
@@ -560,8 +620,14 @@ async function publish() {
     } catch {
       return;
     }
-    const snapshot = collectRows(forwardOwn);
-    if (snapshot.listCount < 1) return;
+    let snapshot;
+    try {
+      snapshot = collectRows(forwardOwn);
+    } catch (error) {
+      chrome.runtime.sendMessage({ type: "watch-error", error: String(error && error.message ? error.message : error) }).catch(() => {});
+      return;
+    }
+    if (snapshot.listCount < 1 && !(snapshot.stats && snapshot.stats.topics)) return;
     chrome.runtime.sendMessage({ type: "unread-snapshot", ...snapshot }).catch(() => {});
   } finally {
     publishing = false;
