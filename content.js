@@ -1,5 +1,6 @@
 const SCAN_MS = 2500;
 const FLAG_MS = 2 * 60 * 60 * 1000;
+const CATCH_MS = 7 * 24 * 60 * 60 * 1000;
 const RECENT_MS = 15 * 60 * 1000;
 
 let timer = 0;
@@ -276,6 +277,39 @@ function rowFromLive(groupId, topicId, time, scope, forwardOwn) {
   return { name: clip(name, 160), preview, key, groupId };
 }
 
+function withoutStamp(el) {
+  if (!el) return "";
+  const clone = el.cloneNode(true);
+  for (const stamp of clone.querySelectorAll("[data-absolute-timestamp]")) stamp.remove();
+  return textOf(clone);
+}
+
+function replySnippet(topic, forwardOwn) {
+  let best = null;
+  let bestTs = -1;
+  for (const node of topic.querySelectorAll('[jsname="GBXEWb"]')) {
+    const stamp = node.querySelector("[data-absolute-timestamp]");
+    const ts = stamp ? Number(stamp.getAttribute("data-absolute-timestamp") || "") : 0;
+    const value = Number.isFinite(ts) ? ts : 0;
+    if (!best || value >= bestTs) {
+      best = node;
+      bestTs = value;
+    }
+  }
+  if (!best) return "";
+  const bits = [];
+  const children = [...best.children];
+  const source = children.length ? children : [best];
+  for (const child of source) {
+    const text = withoutStamp(child);
+    if (!text || isMeta(text)) continue;
+    bits.push(text);
+  }
+  if (!bits.length) return "";
+  if (!forwardOwn && isYou(bits[0])) return "";
+  return bits.join(": ");
+}
+
 function rowFromTopic(topic, count, forwardOwn) {
   const topicId = topic.getAttribute("data-topic-id") || "";
   const groupId = groupIdOf(topic);
@@ -294,10 +328,14 @@ function rowFromTopic(topic, count, forwardOwn) {
   }
   let preview = parts.join("\n");
   if (!preview) {
+    const snippet = replySnippet(topic, forwardOwn);
     const onlySelf = replies.length > 0 && replies.every((node) => isYou(senderName(node)));
-    if (onlySelf && !forwardOwn) return null;
-    const rootBody = messageBody(root || topic);
-    preview = [unreadLabel(topic, count), rootBody].filter(Boolean).join("\n");
+    if (snippet) preview = snippet;
+    else if (onlySelf && !forwardOwn) return null;
+    else {
+      const rootBody = messageBody(root || topic);
+      preview = [unreadLabel(topic, count), rootBody].filter(Boolean).join("\n");
+    }
   }
   preview = clip(preview, 700);
   if (!preview) return null;
@@ -447,6 +485,10 @@ function collectMessageHosts() {
 }
 
 function pushMessage(byKey, groups, coveredTopics, item, forwardOwn) {
+  if (item.host.getAttribute("data-is-initial-message-of-thread") === "true") {
+    const topic = item.host.closest("[data-topic-id]");
+    if (topic && unreadCount(topic) > 0) return false;
+  }
   const row = rowFromHost(item.host, forwardOwn);
   if (!row) return false;
   addRow(byKey, row);
@@ -496,11 +538,11 @@ function collectRows(forwardOwn) {
     if (!catchUpDone) {
       catchUpDone = true;
       const pending = hosts.filter((item) => {
-        return item.flagged && (!item.ts || isRecent(item.ts, FLAG_MS));
+        return item.flagged && (!item.ts || isRecent(item.ts, CATCH_MS));
       });
       pending.sort((a, b) => b.ts - a.ts);
       for (const item of pending.slice(0, 8)) pushMessage(byKey, groups, coveredTopics, item, forwardOwn);
-      const unreadTopics = topics.filter((entry) => entry.count > 0 && isRecent(entry.time, FLAG_MS));
+      const unreadTopics = topics.filter((entry) => entry.count > 0 && (!entry.time || isRecent(entry.time, CATCH_MS)));
       unreadTopics.sort((a, b) => b.time - a.time);
       for (const entry of unreadTopics.slice(0, 8)) {
         if (coveredTopics.has(entry.id)) continue;
