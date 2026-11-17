@@ -2,7 +2,7 @@
 
 Chrome extension that forwards new [Google Chat](https://chat.google.com/) messages to a Telegram bot.
 
-Leave the Chat tab open. It can stay in the background. Messages that arrive after the watcher starts are sent, including in the room you already have open. Messages already on screen at startup are not sent. Your own messages are skipped unless you turn that option on.
+Leave the Chat tab open. It can stay in the background. A notification is sent only when Google Chat shows a new-message badge. Messages with no badge are not sent. Your own messages are skipped unless you turn that option on.
 
 ## Install
 
@@ -34,9 +34,8 @@ The test message should appear in that Telegram chat. A red **!** on the extensi
 ## While it is running
 
 - Keep one `https://chat.google.com/` tab open and signed in.
-- Wait a few seconds after the tab loads. Unread replies, including the reply line on a thread, and messages Chat still marks as new are sent once. That catch-up covers the last 7 days, newest first. Older history is not.
-- A message that arrives after that is sent as `Google Chat`, the room or sender name, and the message text.
-- Chats you are not looking at are picked up from the unread badge in the left nav.
-- The room you have open is watched directly, because Chat marks those messages read immediately.
+- A thread badge or a left-nav badge is required. The badge can be an unread count, “新しいメッセージ”, or “unread”.
+- Wait a few seconds after the tab loads. Badges already on screen from the last 7 days are sent once, newest first.
+- A badge that appears after that is sent as `Google Chat`, the room or sender name, and the reply text.
 
 Forwarding stops if the Chat tab is closed or the computer sleeps. Chrome may also throttle a tab that has been in the background for a long time.

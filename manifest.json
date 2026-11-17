@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Google Chat to Telegram",
-  "version": "1.4.0",
-  "description": "Forwards new Google Chat messages to Telegram.",
+  "version": "1.5.0",
+  "description": "Forwards Google Chat messages that show a new-message badge to Telegram.",
   "permissions": ["storage"],
   "host_permissions": [
     "https://chat.google.com/*",

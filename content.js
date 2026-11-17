@@ -1,16 +1,14 @@
 const SCAN_MS = 2500;
-const FLAG_MS = 2 * 60 * 60 * 1000;
 const CATCH_MS = 7 * 24 * 60 * 60 * 1000;
 const RECENT_MS = 15 * 60 * 1000;
+const BADGE_RE = /unread|new messages?|新しいメッセージ|新着|未読|읽지/i;
 
 let timer = 0;
 let waitingSince = 0;
 let baselineUntil = 0;
 let catchUpDone = false;
 const armedTopic = new Map();
-const armedRoomTime = new Map();
 const armedNav = new Map();
-const armedMessage = new Set();
 const armedLegacy = new Set();
 const recent = new Map();
 
@@ -134,15 +132,34 @@ function queryByDataId(scope, id) {
   return scope.querySelector(`[data-id="${escaped}"]`);
 }
 
+function isBadgeText(label) {
+  if (!label || label.length > 80 || !BADGE_RE.test(label)) return false;
+  if (/toggle|filter|shortcut|more unread|もっと見る|더 보/i.test(label)) return false;
+  return true;
+}
+
+function hasVisibleBadge(topic) {
+  for (const el of topic.querySelectorAll("[aria-label], [jsname='sp9p4']")) {
+    if (isHidden(el)) continue;
+    const label = (el.getAttribute("aria-label") || "").trim();
+    const chip = textOf(el);
+    if (isBadgeText(label) || (chip.length <= 40 && isBadgeText(chip))) return true;
+  }
+  return false;
+}
+
+function topicBadgeCount(topic) {
+  return Math.max(unreadCount(topic), hasVisibleBadge(topic) ? 1 : 0);
+}
+
 function unreadLabel(topic, count) {
   for (const el of topic.querySelectorAll("[aria-label]")) {
     const label = (el.getAttribute("aria-label") || "").trim();
-    if (!/unread|읽지/i.test(label) || label.length > 40) continue;
-    if (/toggle|filter|shortcut|more\s/i.test(label)) continue;
+    if (!isBadgeText(label) || label.length > 40) continue;
     return label;
   }
   const chip = textOf(topic.querySelector('[jsname="sp9p4"]')).replace(/,\s*$/, "");
-  if (chip && chip.length < 40 && /unread|읽지/i.test(chip)) return chip;
+  if (chip && chip.length < 40 && isBadgeText(chip)) return chip;
   return count === 1 ? "1 unread reply" : `${count} unread replies`;
 }
 
@@ -189,7 +206,7 @@ function topicEntries() {
     let count = 0;
     for (const candidate of nodes) {
       const candidateTime = replyTime(candidate);
-      const candidateCount = unreadCount(candidate);
+      const candidateCount = topicBadgeCount(candidate);
       if (candidateTime >= time) {
         time = candidateTime;
         node = candidate;
@@ -212,69 +229,6 @@ function topicChanged(topicId, time, count, warming) {
   const timeGrew = prev.time > 0 && time > prev.time + 1000;
   armedTopic.set(topicId, { time: storedTime, count });
   return countGrew || timeGrew;
-}
-
-function messageContainer(stampEl) {
-  let node = stampEl.parentElement;
-  for (let depth = 0; depth < 12 && node; depth += 1) {
-    if (node.matches && node.matches("c-wiz, [role='main']")) break;
-    const bodies = node.querySelectorAll('[jsname="bgckF"]').length;
-    if (bodies > 1) break;
-    const stamps = node.querySelectorAll("[data-absolute-timestamp]").length;
-    if (bodies === 1 && stamps === 1 && node.querySelector('[jsname="oU6v8b"]')) return node;
-    node = node.parentElement;
-  }
-  return null;
-}
-
-function containerIsOwn(container) {
-  if (!container) return false;
-  if (container.getAttribute("data-is-viewer-message-creator") === "true") return true;
-  const flagged = container.querySelector('[data-is-viewer-message-creator="true"]');
-  return Boolean(flagged && flagged.querySelector('[jsname="bgckF"]'));
-}
-
-function latestMessage(scope) {
-  let best = null;
-  if (!scope) return null;
-  for (const stamp of scope.querySelectorAll("[data-absolute-timestamp]")) {
-    if (isHidden(stamp) || stamp.closest('[role="textbox"], [contenteditable="true"]')) continue;
-    const ts = Number(stamp.getAttribute("data-absolute-timestamp") || "");
-    if (!Number.isFinite(ts) || (best && ts < best.ts)) continue;
-    const container = messageContainer(stamp);
-    const body = messageBody(container);
-    const sender = senderName(container);
-    if (!body && !sender) continue;
-    best = { ts, container, body, sender };
-  }
-  return best;
-}
-
-function timeCovered(times, time) {
-  for (const value of times) {
-    if (Math.abs(value - time) < 3000) return true;
-  }
-  return false;
-}
-
-function rowFromLive(groupId, topicId, time, scope, forwardOwn) {
-  const latest = latestMessage(scope);
-  const matched = latest && time && Math.abs(latest.ts - time) < 5000;
-  const sender = matched ? latest.sender : "";
-  const container = matched ? latest.container : null;
-  const scopeIsOwn = scope && scope.getAttribute("data-is-viewer-message-creator") === "true";
-  if (!forwardOwn && (scopeIsOwn || (matched && (isYou(sender) || containerIsOwn(container))))) return null;
-  let preview = "New message";
-  if (matched && latest.body) {
-    preview = sender && !isYou(sender) ? `${sender}: ${latest.body}` : latest.body;
-  }
-  preview = clip(preview, 700);
-  if (!forwardOwn && isOwn(preview)) return null;
-  const place = conversationName(groupId);
-  let name = place || (!isYou(sender) ? sender : "") || "Google Chat";
-  if (place && sender && !isYou(sender) && sender !== place) name = `${place} · ${sender}`;
-  const key = ["live", groupId || "group", topicId || "room", String(time)].join("|");
-  return { name: clip(name, 160), preview, key, groupId };
 }
 
 function withoutStamp(el) {
@@ -347,7 +301,7 @@ function rowFromTopic(topic, count, forwardOwn) {
 }
 
 function navTextUnread(item) {
-  return /unread\s+(followed\s+)?thread|\bunread\s+message\b|읽지 않은\s*(대화|메시지|답글)?/i.test(textOf(item));
+  return linesOf(item).some((line) => isBadgeText(line));
 }
 
 function navIsUnread(item) {
@@ -355,7 +309,7 @@ function navIsUnread(item) {
   if (navTextUnread(item)) return true;
   for (const el of item.querySelectorAll("[aria-label]")) {
     const label = el.getAttribute("aria-label") || "";
-    if (!/unread|읽지 않/i.test(label)) continue;
+    if (!isBadgeText(label)) continue;
     if (/toggle|filter|shortcut|more unread|더 보/i.test(label)) continue;
     if (isHidden(el)) continue;
     return true;
@@ -376,13 +330,13 @@ function rowFromNav(item, forwardOwn) {
   for (const el of item.querySelectorAll("[aria-label]")) {
     const label = (el.getAttribute("aria-label") || "").trim();
     if (isHidden(el)) continue;
-    if (/unread|읽지 않/i.test(label) && !/toggle|filter|shortcut|more unread/i.test(label)) {
+    if (isBadgeText(label)) {
       badge = label;
       break;
     }
   }
   if (!badge && navTextUnread(item)) {
-    badge = linesOf(item).find((line) => /unread|읽지/i.test(line)) || "Unread thread";
+    badge = linesOf(item).find((line) => isBadgeText(line)) || "Unread thread";
   }
   if (!preview) preview = badge || "Unread";
   preview = clip(preview, 700);
@@ -432,34 +386,6 @@ function messageHost(el) {
   return el.closest("[data-id]");
 }
 
-function hostIsOwn(host) {
-  if (!host) return false;
-  if (host.getAttribute("data-is-viewer-message-creator") === "true") return true;
-  for (const el of host.querySelectorAll('[data-is-viewer-message-creator="true"]')) {
-    const owner = el.closest("[data-id]");
-    if (!owner || owner === host) return true;
-  }
-  return false;
-}
-
-function rowFromHost(host, forwardOwn) {
-  if (!host) return null;
-  if (!forwardOwn && hostIsOwn(host)) return null;
-  const sender = senderName(host);
-  if (!forwardOwn && isYou(sender)) return null;
-  const body = messageBody(host);
-  let preview = body || "New message";
-  if (sender && !isYou(sender)) preview = body ? `${sender}: ${body}` : `${sender}: New message`;
-  preview = clip(preview, 700);
-  if (!preview || (!forwardOwn && isOwn(preview))) return null;
-  const groupId = groupIdOf(host);
-  const place = conversationName(groupId);
-  let name = place || (!isYou(sender) ? sender : "") || "Google Chat";
-  if (place && sender && !isYou(sender) && sender !== place) name = `${place} · ${sender}`;
-  const id = host.getAttribute("data-id") || "";
-  return { name: clip(name, 160), preview, key: `msg|${id}`, groupId };
-}
-
 function hostTime(host) {
   let max = 0;
   for (const stamp of host.querySelectorAll("[data-absolute-timestamp]")) {
@@ -484,19 +410,13 @@ function collectMessageHosts() {
   return [...byId.values()];
 }
 
-function pushMessage(byKey, groups, coveredTopics, item, forwardOwn) {
-  if (item.host.getAttribute("data-is-initial-message-of-thread") === "true") {
-    const topic = item.host.closest("[data-topic-id]");
-    if (topic && unreadCount(topic) > 0) return false;
-  }
-  const row = rowFromHost(item.host, forwardOwn);
-  if (!row) return false;
+function addBadgeTopic(byKey, groups, coveredTopics, entry, forwardOwn) {
+  if (coveredTopics.has(entry.id) || entry.count < 1) return;
+  const row = rowFromTopic(entry.node, entry.count, forwardOwn);
+  if (!row) return;
   addRow(byKey, row);
+  coveredTopics.add(entry.id);
   if (row.groupId) groups.add(row.groupId);
-  const topic = item.host.closest("[data-topic-id]");
-  const topicId = topic ? topic.getAttribute("data-topic-id") || "" : "";
-  if (topicId) coveredTopics.add(topicId);
-  return true;
 }
 
 function collectRows(forwardOwn) {
@@ -504,7 +424,6 @@ function collectRows(forwardOwn) {
   const warming = Date.now() < baselineUntil;
   const byKey = new Map();
   const groups = new Set();
-  const coveredTimes = [];
   const coveredTopics = new Set();
   const hosts = collectMessageHosts();
   const topics = topicEntries();
@@ -514,91 +433,29 @@ function collectRows(forwardOwn) {
   for (const entry of topics) if (entry.count > 0) unread += 1;
 
   if (warming) {
-    for (const item of hosts) {
-      if (item.ts && !isRecent(item.ts, 20000)) armedMessage.add(item.id);
-    }
     for (const entry of topics) topicChanged(entry.id, entry.time, entry.count, true);
-  } else {
-    const arrived = [];
-    for (const item of hosts) {
-      if (armedMessage.has(item.id)) continue;
-      if (item.ts && !isRecent(item.ts, FLAG_MS)) {
-        armedMessage.add(item.id);
-        continue;
-      }
-      arrived.push(item);
-    }
-    arrived.sort((a, b) => b.ts - a.ts);
-    for (const item of arrived.slice(0, 8)) {
-      armedMessage.add(item.id);
-      if (item.ts) coveredTimes.push(item.ts);
-      pushMessage(byKey, groups, coveredTopics, item, forwardOwn);
-    }
-
-    if (!catchUpDone) {
-      catchUpDone = true;
-      const pending = hosts.filter((item) => {
-        return item.flagged && (!item.ts || isRecent(item.ts, CATCH_MS));
-      });
-      pending.sort((a, b) => b.ts - a.ts);
-      for (const item of pending.slice(0, 8)) pushMessage(byKey, groups, coveredTopics, item, forwardOwn);
-      const unreadTopics = topics.filter((entry) => entry.count > 0 && (!entry.time || isRecent(entry.time, CATCH_MS)));
-      unreadTopics.sort((a, b) => b.time - a.time);
-      for (const entry of unreadTopics.slice(0, 8)) {
-        if (coveredTopics.has(entry.id)) continue;
-        const row = rowFromTopic(entry.node, entry.count, forwardOwn);
-        if (!row) continue;
-        addRow(byKey, row);
-        coveredTopics.add(entry.id);
-        if (row.groupId) groups.add(row.groupId);
-        if (entry.time) coveredTimes.push(entry.time);
-      }
-    }
+  } else if (!catchUpDone) {
+    catchUpDone = true;
+    const unreadTopics = topics.filter((entry) => entry.count > 0 && (!entry.time || isRecent(entry.time, CATCH_MS)));
+    unreadTopics.sort((a, b) => b.time - a.time);
+    for (const entry of unreadTopics.slice(0, 8)) addBadgeTopic(byKey, groups, coveredTopics, entry, forwardOwn);
   }
 
   for (const entry of topics) {
-    const groupId = groupIdOf(entry.node);
     const changed = topicChanged(entry.id, entry.time, entry.count, warming);
-    if (warming || !changed || coveredTopics.has(entry.id)) continue;
-    let row = entry.count > 0 ? rowFromTopic(entry.node, entry.count, forwardOwn) : null;
-    if (!row && entry.time) row = rowFromLive(groupId, entry.id, entry.time, entry.node, forwardOwn);
-    if (entry.time) coveredTimes.push(entry.time);
-    if (!row) continue;
-    addRow(byKey, row);
-    if (row.groupId) groups.add(row.groupId);
+    if (warming || !changed || entry.count < 1) continue;
+    addBadgeTopic(byKey, groups, coveredTopics, entry, forwardOwn);
   }
 
   const main = document.querySelector('[role="main"][data-group-id]');
-  if (main) {
-    const groupId = main.getAttribute("data-group-id") || "";
-    let maxTs = 0;
-    for (const stamp of main.querySelectorAll("[data-absolute-timestamp]")) {
-      if (stamp.closest('[role="textbox"], [contenteditable="true"]')) continue;
-      const value = stampValue(stamp);
-      if (value > maxTs) maxTs = value;
-    }
-    const prev = armedRoomTime.get(groupId);
-    if (prev === undefined || warming) armedRoomTime.set(groupId, Math.max(prev || 0, maxTs));
-    else if (maxTs > prev + 1000) {
-      armedRoomTime.set(groupId, maxTs);
-      if (!timeCovered(coveredTimes, maxTs)) addRow(byKey, rowFromLive(groupId, "", maxTs, main, forwardOwn));
-    }
-  }
-
-  const openGroup = main ? main.getAttribute("data-group-id") || "" : "";
   const seenNav = new Set();
   for (const item of document.querySelectorAll('[role="listitem"][data-group-id]')) {
     const groupId = item.getAttribute("data-group-id") || "";
     if (!groupId || !navIsUnread(item)) continue;
-    const threadUnread = navTextUnread(item);
-    if (groupId === openGroup && !threadUnread) continue;
     seenNav.add(groupId);
     const row = rowFromNav(item, forwardOwn);
     if (!row) continue;
-    if (warming) {
-      armedNav.set(groupId, row.key);
-      continue;
-    }
+    if (warming) continue;
     const prevKey = armedNav.get(groupId);
     if (prevKey === row.key || groups.has(groupId)) {
       armedNav.set(groupId, row.key);
