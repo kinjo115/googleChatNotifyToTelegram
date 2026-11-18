@@ -1,6 +1,6 @@
 const SESSION_KEYS = "seenKeys";
 const SESSION_PRIMED = "primed";
-const SEEN_VERSION = "4";
+const SEEN_VERSION = "5";
 
 let seen = new Set();
 let primed = false;

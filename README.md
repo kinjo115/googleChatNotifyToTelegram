@@ -34,8 +34,8 @@ The test message should appear in that Telegram chat. A red **!** on the extensi
 ## While it is running
 
 - Keep one `https://chat.google.com/` tab open and signed in.
-- A thread badge or a left-nav badge is required. The badge can be an unread count, “新しいメッセージ”, or “unread”.
-- Wait a few seconds after the tab loads. Badges already on screen from the last 7 days are sent once, newest first.
-- A badge that appears after that is sent as `Google Chat`, the room or sender name, and the reply text.
+- A notification is sent only when a new-message badge is showing. That includes a thread chip (`1 unread`), a conversation row (`Unread followed thread`), a Home or Mentions shortcut count, or a thread-panel count (`1 Unread thread`).
+- After you reload the extension, refresh the Chat tab. Badges already on screen are sent once.
+- A later notification is sent when that badge appears again or its count or time changes. A message with no badge is not sent.
 
 Forwarding stops if the Chat tab is closed or the computer sleeps. Chrome may also throttle a tab that has been in the background for a long time.
